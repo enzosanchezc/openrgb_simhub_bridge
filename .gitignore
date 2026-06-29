@@ -1,0 +1,12 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+
+# Plugin runtime artifacts (generated next to the deployed DLL)
+OpenRgbSimhubBridge.log
+OpenRgbSimhubBridge.json

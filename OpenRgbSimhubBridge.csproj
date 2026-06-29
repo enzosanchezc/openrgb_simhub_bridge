@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>OpenRgbSimhubBridge</AssemblyName>
+    <RootNamespace>OpenRgbSimhubBridge</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Deterministic>true</Deterministic>
+    <!-- Override on the command line with: dotnet build -p:SimHubPath="D:\Path\To\SimHub" -->
+    <SimHubPath Condition="'$(SimHubPath)' == ''">C:\Program Files (x86)\SimHub</SimHubPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Lets the modern dotnet SDK target .NET Framework 4.8 without Visual Studio / a targeting pack installed. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SimHub-provided assemblies. Private=false: never copy them next to our DLL (SimHub owns them). -->
+    <Reference Include="GameReaderCommon">
+      <HintPath>$(SimHubPath)\GameReaderCommon.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SimHub.Plugins">
+      <HintPath>$(SimHubPath)\SimHub.Plugins.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(SimHubPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Copy the built plugin into the SimHub folder. Non-fatal: if SimHub is in Program Files this
+       needs an elevated shell, so a failure here is just a warning - copy the DLL manually if so. -->
+  <Target Name="DeployToSimHub" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(SimHubPath)"
+          ContinueOnError="true" />
+    <Message Importance="high" Text="Built plugin: $(TargetPath)" />
+    <Message Importance="high" Text="Deploy target: $(SimHubPath)\$(AssemblyName).dll (copy manually if the step above was skipped)" />
+  </Target>
+
+</Project>
