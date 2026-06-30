@@ -1,24 +1,31 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Threading;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 using GameReaderCommon;
 using SimHub.Plugins;
 
 namespace OpenRgbSimhubBridge
 {
     /// <summary>
-    /// SimHub data plugin that mirrors the current race flag onto an OpenRGB device
-    /// (e.g. a HyperX Alloy Origins keyboard) by talking to OpenRGB's SDK server.
+    /// SimHub data plugin that mirrors the current race flag onto one or more OpenRGB devices
+    /// (e.g. a keyboard, mouse, RAM) by talking to OpenRGB's SDK server.
     ///
     /// DataUpdate (called every frame) only records the desired flag - it must stay cheap.
     /// A background thread does the OpenRGB network I/O, drives the flashing animation,
     /// and reconnects if OpenRGB isn't running yet.
+    ///
+    /// Implements <see cref="IWPFSettingsV2"/> so everything is configurable from a page in
+    /// SimHub's left menu; the same settings are still persisted to OpenRgbSimhubBridge.json.
     /// </summary>
     [PluginName("OpenRGB Flag Bridge")]
     [PluginAuthor("openrgb_simhub_bridge")]
-    [PluginDescription("Shows race flags on an OpenRGB device (HyperX keyboard, etc.) via the OpenRGB SDK.")]
-    public class FlagLightPlugin : IPlugin, IDataPlugin
+    [PluginDescription("Shows race flags on OpenRGB devices (keyboard, mouse, etc.) via the OpenRGB SDK.")]
+    public class FlagLightPlugin : IPlugin, IDataPlugin, IWPFSettingsV2
     {
         public PluginManager PluginManager { get; set; }
 
@@ -26,25 +33,121 @@ namespace OpenRgbSimhubBridge
 
         private Config _config;
         private string _baseDir;
+        private string _configPath;
         private FileLogger _log;
 
         private volatile bool _running;
+        private volatile bool _forceReconnect;
         private volatile Flag _currentFlag = Flag.None;
         private volatile bool _gameRunning;
+        private volatile string _statusLine = "Starting…";
         private Thread _renderThread;
 
         public void Init(PluginManager pluginManager)
         {
             _baseDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Environment.CurrentDirectory;
+            _configPath = Path.Combine(_baseDir, "OpenRgbSimhubBridge.json");
             _log = new FileLogger(Path.Combine(_baseDir, "OpenRgbSimhubBridge.log"));
             _log.Info("Plugin init.");
 
-            _config = Config.LoadOrCreate(Path.Combine(_baseDir, "OpenRgbSimhubBridge.json"), m => _log.Info(m));
-            _log.Info($"Target device='{_config.DeviceName}', endpoint={_config.Host}:{_config.Port}, brightness={_config.Brightness}.");
+            _config = Config.LoadOrCreate(_configPath, m => _log.Info(m));
+            _log.Info($"Devices=[{string.Join(", ", _config.Devices)}], endpoint={_config.Host}:{_config.Port}, brightness={_config.Brightness}.");
 
             _running = true;
             _renderThread = new Thread(RenderLoop) { IsBackground = true, Name = "OpenRGB-Flag-Render" };
             _renderThread.Start();
+        }
+
+        // --- IWPFSettingsV2 (settings page in SimHub's left menu) --------------------------------
+
+        public string LeftMenuTitle => "OpenRGB Flag Bridge";
+
+        public ImageSource PictureIcon => _icon ?? (_icon = BuildIcon());
+
+        public Control GetWPFSettingsControl(PluginManager pluginManager) => new SettingsControl(this);
+
+        private static ImageSource _icon;
+
+        /// <summary>
+        /// Left-menu icon: a small checkered flag on a pole, drawn as a frozen WPF vector so there's
+        /// no binary asset to ship. White on transparent so it reads on SimHub's dark sidebar.
+        /// </summary>
+        private static ImageSource BuildIcon()
+        {
+            var white = new SolidColorBrush(Colors.White);
+            white.Freeze();
+
+            var group = new DrawingGroup();
+
+            // Flag pole.
+            group.Children.Add(new GeometryDrawing(white, null,
+                new RectangleGeometry(new Rect(5, 3, 2, 26))));
+
+            // Checkered flag: 6×4 grid of squares, filling every other cell.
+            const double ox = 8, oy = 4, sq = 4;
+            const int cols = 6, rows = 4;
+
+            var checkers = new GeometryGroup();
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                    if (((r + c) & 1) == 0)
+                        checkers.Children.Add(new RectangleGeometry(new Rect(ox + c * sq, oy + r * sq, sq, sq)));
+            group.Children.Add(new GeometryDrawing(white, null, checkers));
+
+            // Flag outline so the silhouette reads as a rectangle even where cells are empty.
+            var pen = new Pen(white, 1.0);
+            pen.Freeze();
+            group.Children.Add(new GeometryDrawing(null, pen,
+                new RectangleGeometry(new Rect(ox, oy, cols * sq, rows * sq))));
+
+            var img = new DrawingImage(group);
+            img.Freeze();
+            return img;
+        }
+
+        /// <summary>The live config the settings UI edits in place.</summary>
+        internal Config Config => _config;
+
+        /// <summary>Human-readable connection state for the settings UI.</summary>
+        internal string StatusLine => _statusLine;
+
+        /// <summary>Persist the current config to disk (best-effort; never throws to the UI).</summary>
+        internal void SaveConfig()
+        {
+            try { _config.Save(_configPath); }
+            catch (Exception ex) { _log?.Warn("Could not save config: " + ex.Message); }
+        }
+
+        /// <summary>Ask the render thread to drop its connection and rebind (e.g. after a device/host/port change).</summary>
+        internal void RequestReconnect() => _forceReconnect = true;
+
+        /// <summary>
+        /// Connect to OpenRGB once and list the device names it exposes, for the settings UI's
+        /// device picker. Runs on a background thread (the UI calls it off a Task), separate from
+        /// the render thread; OpenRGB accepts multiple SDK clients so this is safe.
+        /// </summary>
+        internal string[] QueryDeviceNames(out string error)
+        {
+            error = null;
+            OpenRgbClient client = null;
+            try
+            {
+                client = new OpenRgbClient(_config.Host, _config.Port, "SimHub Flag Bridge (picker)");
+                client.Connect();
+                var names = new List<string>();
+                foreach (var d in client.ListDevices())
+                    names.Add(d.Name);
+                return names.ToArray();
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return Array.Empty<string>();
+            }
+            finally
+            {
+                try { client?.Dispose(); } catch { /* ignore */ }
+            }
         }
 
         public void DataUpdate(PluginManager pluginManager, ref GameData data)
@@ -75,6 +178,7 @@ namespace OpenRgbSimhubBridge
         public void End(PluginManager pluginManager)
         {
             _log?.Info("Plugin shutting down.");
+            SaveConfig(); // save-on-shutdown safety net for any unsaved tweaks
             _running = false;
             try { _renderThread?.Join(1000); } catch { /* ignore */ }
         }
@@ -84,7 +188,7 @@ namespace OpenRgbSimhubBridge
         private void RenderLoop()
         {
             OpenRgbClient client = null;
-            OpenRgbDevice device = null;
+            List<OpenRgbDevice> devices = null;
             Rgb lastSent = new Rgb(1, 2, 3); // unlikely first colour -> force initial push
             bool haveLast = false;
             DateTime nextReconnect = DateTime.MinValue;
@@ -93,7 +197,26 @@ namespace OpenRgbSimhubBridge
             {
                 try
                 {
-                    if (client == null || !client.IsConnected || device == null)
+                    if (_forceReconnect)
+                    {
+                        _forceReconnect = false;
+                        try { client?.Dispose(); } catch { /* ignore */ }
+                        client = null;
+                        devices = null;
+                        nextReconnect = DateTime.MinValue; // rebind immediately
+                    }
+
+                    // Nothing to do until the user has picked at least one device.
+                    var filters = _config.Devices; // read the reference once (UI swaps it atomically)
+                    if (filters == null || filters.Count == 0)
+                    {
+                        if (client != null) { try { client.Dispose(); } catch { } client = null; devices = null; }
+                        _statusLine = "No devices configured — add one in Settings.";
+                        Thread.Sleep(200);
+                        continue;
+                    }
+
+                    if (client == null || !client.IsConnected || devices == null)
                     {
                         if (DateTime.UtcNow < nextReconnect) { Thread.Sleep(50); continue; }
                         nextReconnect = DateTime.UtcNow.AddSeconds(2);
@@ -101,34 +224,43 @@ namespace OpenRgbSimhubBridge
                         client?.Dispose();
                         client = new OpenRgbClient(_config.Host, _config.Port, "SimHub Flag Bridge");
                         client.Connect();
-                        device = client.FindDevice(_config.DeviceName);
-                        if (device == null)
+
+                        devices = MatchDevices(client, filters);
+                        if (devices.Count == 0)
                         {
-                            _log.Warn($"Connected to OpenRGB but no device matched '{_config.DeviceName}'. " +
+                            _statusLine = "No devices matched. Available: " + DescribeDevices(client);
+                            _log.Warn($"Connected to OpenRGB but no device matched [{string.Join(", ", filters)}]. " +
                                       "Available: " + DescribeDevices(client));
                             client.Dispose();
                             client = null;
+                            devices = null;
                             continue;
                         }
-                        client.SetCustomMode((uint)device.Index);
+
+                        foreach (var d in devices)
+                            client.SetCustomMode((uint)d.Index);
                         haveLast = false;
-                        _log.Info($"Bound to device #{device.Index} '{device.Name}' ({device.LedCount} LEDs).");
+                        _statusLine = $"Connected — {devices.Count} device(s) bound.";
+                        _log.Info($"Bound {devices.Count} device(s): " +
+                                  string.Join(", ", devices.ConvertAll(d => $"#{d.Index} '{d.Name}' ({d.LedCount} LEDs)")));
                     }
 
                     Rgb target = ComputeTargetColor();
                     if (!haveLast || !target.Equals(lastSent))
                     {
-                        client.SetSolidColor(device, target.R, target.G, target.B);
+                        foreach (var d in devices)
+                            client.SetSolidColor(d, target.R, target.G, target.B);
                         lastSent = target;
                         haveLast = true;
                     }
                 }
                 catch (Exception ex)
                 {
+                    _statusLine = "OpenRGB not reachable, retrying… (" + ex.Message + ")";
                     _log.Warn("OpenRGB I/O error, will reconnect: " + ex.Message);
                     try { client?.Dispose(); } catch { /* ignore */ }
                     client = null;
-                    device = null;
+                    devices = null;
                     nextReconnect = DateTime.UtcNow.AddSeconds(2);
                 }
 
@@ -136,6 +268,25 @@ namespace OpenRgbSimhubBridge
             }
 
             try { client?.Dispose(); } catch { /* ignore */ }
+        }
+
+        /// <summary>Every connected device whose name contains any of the configured filters (case-insensitive).</summary>
+        private static List<OpenRgbDevice> MatchDevices(OpenRgbClient client, List<string> filters)
+        {
+            var matched = new List<OpenRgbDevice>();
+            foreach (var d in client.ListDevices())
+            {
+                foreach (var f in filters)
+                {
+                    if (!string.IsNullOrWhiteSpace(f) &&
+                        d.Name.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        matched.Add(d);
+                        break;
+                    }
+                }
+            }
+            return matched;
         }
 
         private Rgb ComputeTargetColor()

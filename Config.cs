@@ -12,8 +12,12 @@ namespace OpenRgbSimhubBridge
     /// </summary>
     internal sealed class Config
     {
-        // Substring match, case-insensitive. "HyperX Alloy Origins" also works (matches the "(HP)" variant).
-        public string DeviceName { get; set; } = "HyperX Alloy Origins (HP)";
+        /// <summary>
+        /// Names (or name substrings, case-insensitive) of the OpenRGB devices to drive. Every
+        /// device whose name contains any entry is lit. Empty = nothing configured yet (pick your
+        /// device(s) in the settings UI).
+        /// </summary>
+        public List<string> Devices { get; set; } = new List<string>();
         public string Host { get; set; } = "127.0.0.1";
         public int Port { get; set; } = 6742;
 
@@ -53,6 +57,7 @@ namespace OpenRgbSimhubBridge
                     if (cfg != null)
                     {
                         if (cfg.Flags == null || cfg.Flags.Count == 0) cfg.Flags = DefaultFlags();
+                        if (cfg.Devices == null) cfg.Devices = new List<string>();
                         return cfg;
                     }
                 }

@@ -57,31 +57,7 @@ namespace OpenRgbSimhubBridge
             Send(0, CmdSetClientName, payload);
         }
 
-        /// <summary>Enumerate all controllers and return the index/LED-count of the first whose name
-        /// contains <paramref name="deviceNameFilter"/> (case-insensitive). null if not found.</summary>
-        public OpenRgbDevice FindDevice(string deviceNameFilter)
-        {
-            Send(0, CmdRequestControllerCount, Array.Empty<byte>());
-            var countPayload = Receive(out uint cmd, out _);
-            if (cmd != CmdRequestControllerCount || countPayload.Length < 4)
-                throw new IOException("Unexpected reply to controller-count request.");
-            uint count = BitConverter.ToUInt32(countPayload, 0);
-
-            for (uint i = 0; i < count; i++)
-            {
-                Send(i, CmdRequestControllerData, Array.Empty<byte>());
-                var data = Receive(out uint dataCmd, out _);
-                if (dataCmd != CmdRequestControllerData)
-                    continue;
-
-                var dev = ParseController(i, data);
-                if (dev.Name.IndexOf(deviceNameFilter, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return dev;
-            }
-            return null;
-        }
-
-        /// <summary>List all controller names (for diagnostics / config help).</summary>
+        /// <summary>List all controllers (name + LED count); used to match configured devices and for diagnostics.</summary>
         public List<OpenRgbDevice> ListDevices()
         {
             var result = new List<OpenRgbDevice>();

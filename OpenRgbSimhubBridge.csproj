@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
     <LangVersion>9.0</LangVersion>
     <AssemblyName>OpenRgbSimhubBridge</AssemblyName>
     <RootNamespace>OpenRgbSimhubBridge</RootNamespace>
