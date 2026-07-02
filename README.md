@@ -57,7 +57,7 @@ manual edits.
   "Port": 6742,
   "Brightness": 1.0,            // 0..1 multiplier on every colour
   "FlashHz": 2.0,              // flashing speed, full on/off cycles per second
-  "OnlyWhenGameRunning": true, // leave the devices alone unless a game is running
+  "OnlyWhenGameRunning": true, // only drive while a game runs; otherwise restore the device's original OpenRGB lighting
   "IdleColor": null,           // "#101010" for an idle colour, or null = off when no flag
   "Flags": {
     "Green":     { "Color": "#00FF00", "Flash": false },
@@ -86,6 +86,11 @@ When several flags are active at once, the highest-priority one wins, in this or
 - A background thread (~40 Hz) connects to OpenRGB, finds the configured device(s), switches each to
   its Direct/Custom mode, and pushes a single colour to all of their LEDs — re-sending only when the
   colour changes, and driving the flash animation. If OpenRGB isn't running it retries every 2 s.
+- With `OnlyWhenGameRunning` on (the default) it takes the device(s) over **only while a game is
+  running**. Before switching to Custom mode it snapshots each device's current OpenRGB mode and
+  colours, and when the game exits (or SimHub shuts down) it restores that snapshot — so quitting a
+  game hands your normal lighting (rainbow, static, …) straight back to OpenRGB instead of leaving
+  the device dark. (Restoring a per-key *static* colour is best-effort; effect modes restore exactly.)
 
 ## Testing
 

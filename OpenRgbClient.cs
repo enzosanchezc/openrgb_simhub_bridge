@@ -24,6 +24,7 @@ namespace OpenRgbSimhubBridge
         private const uint CmdSetClientName = 50;
         private const uint CmdSetCustomMode = 1004;
         private const uint CmdUpdateLeds = 1050;
+        private const uint CmdUpdateMode = 1101;
 
         private readonly string _host;
         private readonly int _port;
@@ -107,6 +108,39 @@ namespace OpenRgbSimhubBridge
             Send((uint)device.Index, CmdUpdateLeds, buf);
         }
 
+        /// <summary>
+        /// Re-select the mode the device was in before we took it over (RGBCONTROLLER_UPDATEMODE),
+        /// handing it back to whatever effect/colour OpenRGB was running. <paramref name="modeBytes"/>
+        /// is the raw serialised mode captured from the controller data (see <see cref="ParseController"/>);
+        /// we only prepend the payload size and mode index, so we never have to hand-encode mode fields.
+        /// </summary>
+        public void RestoreMode(uint deviceIndex, int modeIndex, byte[] modeBytes)
+        {
+            if (modeBytes == null || modeIndex < 0) return;
+            int payloadLen = 4 + 4 + modeBytes.Length; // data_size + mode_index + mode fields
+            var buf = new byte[payloadLen];
+            Array.Copy(BitConverter.GetBytes((uint)payloadLen), 0, buf, 0, 4);
+            Array.Copy(BitConverter.GetBytes(modeIndex), 0, buf, 4, 4);
+            Array.Copy(modeBytes, 0, buf, 8, modeBytes.Length);
+            Send(deviceIndex, CmdUpdateMode, buf);
+        }
+
+        /// <summary>
+        /// Re-send the per-LED colour buffer captured before takeover. Needed for devices whose
+        /// "original" was a static/Direct colour (restoring the mode alone wouldn't bring those back);
+        /// harmless for effect modes, which overwrite it on their next frame. <paramref name="colorsBlock"/>
+        /// is the trailing colour block from the controller data (uint16 count + count*RGBColor).
+        /// </summary>
+        public void RestoreLedColors(uint deviceIndex, byte[] colorsBlock)
+        {
+            if (colorsBlock == null || colorsBlock.Length < 2) return;
+            int payloadLen = 4 + colorsBlock.Length; // data_size + (num_colors + colours)
+            var buf = new byte[payloadLen];
+            Array.Copy(BitConverter.GetBytes((uint)payloadLen), 0, buf, 0, 4);
+            Array.Copy(colorsBlock, 0, buf, 4, colorsBlock.Length);
+            Send(deviceIndex, CmdUpdateLeds, buf);
+        }
+
         // --- protocol-version-0 controller-data parser -----------------------------------------
 
         private static OpenRgbDevice ParseController(uint index, byte[] data)
@@ -123,9 +157,22 @@ namespace OpenRgbSimhubBridge
                 ReadString(r);            // location
 
                 ushort numModes = r.ReadUInt16();
-                r.ReadInt32();            // active_mode
+                int activeMode = r.ReadInt32();
+                // Capture the active mode's raw serialised fields so we can put the device back the
+                // way we found it (via RestoreMode). Each mode here is encoded exactly as the mode
+                // struct that RGBCONTROLLER_UPDATEMODE expects, minus the leading size + mode index.
+                byte[] activeModeBytes = null;
                 for (int m = 0; m < numModes; m++)
+                {
+                    long start = ms.Position;
                     SkipMode(r);
+                    if (m == activeMode)
+                    {
+                        long end = ms.Position;
+                        activeModeBytes = new byte[end - start];
+                        Array.Copy(data, start, activeModeBytes, 0, (int)(end - start));
+                    }
+                }
 
                 ushort numZones = r.ReadUInt16();
                 for (int z = 0; z < numZones; z++)
@@ -137,9 +184,25 @@ namespace OpenRgbSimhubBridge
                     ReadString(r);        // led name
                     r.ReadUInt32();       // led value
                 }
-                // (trailing colour array intentionally not read - we have the LED count we need)
 
-                return new OpenRgbDevice((int)index, name, numLeds);
+                // Trailing colour buffer (uint16 count + count*RGBColor) = the device's current
+                // colours. Captured (best-effort) so RestoreLedColors can reinstate a static colour.
+                byte[] ledColorsBlock = null;
+                try
+                {
+                    long colStart = ms.Position;
+                    ushort numColors = r.ReadUInt16();
+                    long need = (long)numColors * 4;
+                    if (ms.Position + need <= ms.Length)
+                    {
+                        ms.Seek(need, SeekOrigin.Current);
+                        ledColorsBlock = new byte[ms.Position - colStart];
+                        Array.Copy(data, colStart, ledColorsBlock, 0, ledColorsBlock.Length);
+                    }
+                }
+                catch { /* colour capture is best-effort; restore just skips it */ }
+
+                return new OpenRgbDevice((int)index, name, numLeds, activeMode, activeModeBytes, ledColorsBlock);
             }
         }
 
@@ -231,15 +294,28 @@ namespace OpenRgbSimhubBridge
 
     internal sealed class OpenRgbDevice
     {
-        public OpenRgbDevice(int index, string name, int ledCount)
+        public OpenRgbDevice(int index, string name, int ledCount,
+            int activeModeIndex = -1, byte[] activeModeBytes = null, byte[] ledColorsBlock = null)
         {
             Index = index;
             Name = name ?? string.Empty;
             LedCount = ledCount;
+            ActiveModeIndex = activeModeIndex;
+            ActiveModeBytes = activeModeBytes;
+            LedColorsBlock = ledColorsBlock;
         }
 
         public int Index { get; }
         public string Name { get; }
         public int LedCount { get; }
+
+        /// <summary>Index of the mode the device was in when first seen; -1 if unknown. For restore.</summary>
+        public int ActiveModeIndex { get; }
+
+        /// <summary>Raw serialised fields of that mode (for RGBCONTROLLER_UPDATEMODE); null if unknown.</summary>
+        public byte[] ActiveModeBytes { get; }
+
+        /// <summary>Raw trailing colour buffer captured before takeover; null if unknown.</summary>
+        public byte[] LedColorsBlock { get; }
     }
 }

@@ -189,8 +189,13 @@ namespace OpenRgbSimhubBridge
         {
             OpenRgbClient client = null;
             List<OpenRgbDevice> devices = null;
+            // Original mode/colours captured (once) per device name, so a reconnect while we're
+            // already driving can't overwrite the genuine pre-takeover state with our own colours.
+            var snapshots = new Dictionary<string, DeviceSnapshot>(StringComparer.OrdinalIgnoreCase);
             Rgb lastSent = new Rgb(1, 2, 3); // unlikely first colour -> force initial push
             bool haveLast = false;
+            bool takenOver = false;   // we've switched the device(s) to Custom mode and are driving them
+            bool needsRestore = false; // device(s) still hold our colours and must be handed back
             DateTime nextReconnect = DateTime.MinValue;
 
             while (_running)
@@ -203,6 +208,9 @@ namespace OpenRgbSimhubBridge
                         try { client?.Dispose(); } catch { /* ignore */ }
                         client = null;
                         devices = null;
+                        takenOver = false;
+                        needsRestore = false;
+                        snapshots.Clear(); // device/host/port may have changed - re-capture originals
                         nextReconnect = DateTime.MinValue; // rebind immediately
                     }
 
@@ -210,7 +218,7 @@ namespace OpenRgbSimhubBridge
                     var filters = _config.Devices; // read the reference once (UI swaps it atomically)
                     if (filters == null || filters.Count == 0)
                     {
-                        if (client != null) { try { client.Dispose(); } catch { } client = null; devices = null; }
+                        if (client != null) { try { client.Dispose(); } catch { } client = null; devices = null; takenOver = false; needsRestore = false; }
                         _statusLine = "No devices configured — add one in Settings.";
                         Thread.Sleep(200);
                         continue;
@@ -237,21 +245,55 @@ namespace OpenRgbSimhubBridge
                             continue;
                         }
 
+                        // Remember each device's original mode/colours the first time we bind it,
+                        // before we ever switch it to Custom mode, so we can restore it later.
                         foreach (var d in devices)
-                            client.SetCustomMode((uint)d.Index);
+                            if (!snapshots.ContainsKey(d.Name))
+                                snapshots[d.Name] = new DeviceSnapshot(d.ActiveModeIndex, d.ActiveModeBytes, d.LedColorsBlock);
+
+                        takenOver = false; // don't grab the device(s) until a game is actually running
                         haveLast = false;
                         _statusLine = $"Connected — {devices.Count} device(s) bound.";
                         _log.Info($"Bound {devices.Count} device(s): " +
                                   string.Join(", ", devices.ConvertAll(d => $"#{d.Index} '{d.Name}' ({d.LedCount} LEDs)")));
                     }
 
-                    Rgb target = ComputeTargetColor();
-                    if (!haveLast || !target.Equals(lastSent))
+                    // Only drive the device(s) while a game is running (unless the user opted out);
+                    // otherwise leave them to OpenRGB and restore whatever they were showing.
+                    bool active = !_config.OnlyWhenGameRunning || _gameRunning;
+
+                    if (active)
                     {
-                        foreach (var d in devices)
-                            client.SetSolidColor(d, target.R, target.G, target.B);
-                        lastSent = target;
-                        haveLast = true;
+                        if (!takenOver)
+                        {
+                            foreach (var d in devices)
+                                client.SetCustomMode((uint)d.Index);
+                            takenOver = true;
+                            needsRestore = true;
+                            haveLast = false;
+                            _statusLine = $"Active — {devices.Count} device(s) showing flags.";
+                        }
+
+                        Rgb target = ComputeTargetColor();
+                        if (!haveLast || !target.Equals(lastSent))
+                        {
+                            foreach (var d in devices)
+                                client.SetSolidColor(d, target.R, target.G, target.B);
+                            lastSent = target;
+                            haveLast = true;
+                        }
+                    }
+                    else
+                    {
+                        if (needsRestore)
+                        {
+                            RestoreDevices(client, devices, snapshots);
+                            needsRestore = false;
+                            _log.Info("No game running — released device(s) back to OpenRGB.");
+                        }
+                        takenOver = false;
+                        haveLast = false;
+                        _statusLine = "Idle — no game running; device(s) left to OpenRGB.";
                     }
                 }
                 catch (Exception ex)
@@ -261,13 +303,34 @@ namespace OpenRgbSimhubBridge
                     try { client?.Dispose(); } catch { /* ignore */ }
                     client = null;
                     devices = null;
+                    takenOver = false;
+                    // keep needsRestore: if we were driving, we still owe a restore once reconnected
                     nextReconnect = DateTime.UtcNow.AddSeconds(2);
                 }
 
                 Thread.Sleep(25); // ~40 Hz render tick (enough for smooth flashing)
             }
 
+            // On shutdown, hand the device(s) back to OpenRGB if we're still holding them.
+            try
+            {
+                if (needsRestore && client != null && client.IsConnected && devices != null)
+                    RestoreDevices(client, devices, snapshots);
+            }
+            catch (Exception ex) { _log.Warn("Restore on shutdown failed: " + ex.Message); }
             try { client?.Dispose(); } catch { /* ignore */ }
+        }
+
+        /// <summary>Re-apply each bound device's captured original mode and colours (best-effort restore).</summary>
+        private static void RestoreDevices(OpenRgbClient client, List<OpenRgbDevice> devices,
+            Dictionary<string, DeviceSnapshot> snapshots)
+        {
+            foreach (var d in devices)
+            {
+                if (!snapshots.TryGetValue(d.Name, out var s)) continue;
+                client.RestoreMode((uint)d.Index, s.ModeIndex, s.ModeBytes);
+                client.RestoreLedColors((uint)d.Index, s.ColorsBlock);
+            }
         }
 
         /// <summary>Every connected device whose name contains any of the configured filters (case-insensitive).</summary>
@@ -314,6 +377,21 @@ namespace OpenRgbSimhubBridge
             }
 
             return color;
+        }
+
+        /// <summary>A device's original mode + colours, captured before takeover so we can restore it.</summary>
+        private sealed class DeviceSnapshot
+        {
+            public DeviceSnapshot(int modeIndex, byte[] modeBytes, byte[] colorsBlock)
+            {
+                ModeIndex = modeIndex;
+                ModeBytes = modeBytes;
+                ColorsBlock = colorsBlock;
+            }
+
+            public int ModeIndex { get; }
+            public byte[] ModeBytes { get; }
+            public byte[] ColorsBlock { get; }
         }
 
         private static string DescribeDevices(OpenRgbClient client)

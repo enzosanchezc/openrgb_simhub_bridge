@@ -76,7 +76,8 @@
             </Grid>
 
             <CheckBox x:Name="OnlyWhenGameRunningCheck" Margin="0,4,0,8"
-                      Content="Only drive devices while a game is running"/>
+                      Content="Only drive devices while a game is running"
+                      ToolTip="When on, the device(s) are taken over only while a game runs. On exit the plugin restores whatever mode/colour OpenRGB was showing before, instead of leaving them dark."/>
 
             <Grid Margin="0,0,0,4">
                 <Grid.ColumnDefinitions>
